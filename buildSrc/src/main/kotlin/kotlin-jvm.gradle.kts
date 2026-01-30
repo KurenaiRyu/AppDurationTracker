@@ -3,6 +3,7 @@
 package buildsrc.convention
 
 import org.gradle.api.tasks.testing.logging.TestLogEvent
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     // Apply the Kotlin JVM plugin to add support for Kotlin in JVM projects.
@@ -12,6 +13,9 @@ plugins {
 kotlin {
     // Use a specific Java version to make it easier to work in different environments.
     jvmToolchain(25)
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_25
+    }
 }
 
 tasks.withType<Test>().configureEach {
