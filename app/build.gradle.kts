@@ -15,6 +15,8 @@ dependencies {
     implementation(project(":utils"))
 
     implementation(libs.okio)
+    implementation(libs.bundles.log)
+    implementation(libs.kotlinx.coroutines)
 
     testImplementation(kotlin("test"))
 }

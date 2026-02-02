@@ -6,14 +6,20 @@
 kotlin = "2.3.0"
 okio = "3.16.2"
 coroutines = "1.10.2"
+log4j = "2.20.0"
 
 [libraries]
 kotlinGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 kotlinx-coroutines = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
+apache-log4j-core = { group = "org.apache.logging.log4j", name = "log4j-core", version.ref = "log4j" }
+apache-log4j-api = { group = "org.apache.logging.log4j", name = "log4j-api", version.ref = "log4j" }
+apache-log4j-slf4j2 = { group = "org.apache.logging.log4j", name = "log4j-slf4j2-impl", version.ref = "log4j" }
+slf4j-api = { group = "org.slf4j", name = "slf4j-api", version = "2.0.6" }
 
 # Libraries can be bundled together for easier import
 [bundles]
+log = ["apache-log4j-api", "apache-log4j-core", "apache-log4j-slf4j2", "slf4j-api"]
 
 [plugins]
 kotlinPluginSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

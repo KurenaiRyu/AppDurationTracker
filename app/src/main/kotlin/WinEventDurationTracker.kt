@@ -1,5 +1,7 @@
 package moe.kurenai.app
 
+import kotlinx.coroutines.channels.Channel
+import org.slf4j.LoggerFactory
 import java.lang.foreign.*
 import java.lang.foreign.ValueLayout.ADDRESS
 import java.lang.foreign.ValueLayout.JAVA_INT
@@ -7,13 +9,12 @@ import java.lang.foreign.ValueLayout.JAVA_SHORT
 import java.lang.invoke.MethodHandle
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
-import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDateTime
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.io.path.pathString
-import kotlin.system.exitProcess
 
 
 /**
@@ -24,6 +25,8 @@ import kotlin.system.exitProcess
  * - 在 Windows x64 上运行
  */
 object WinEventDurationTracker {
+    private val log = LoggerFactory.getLogger(this::class.java)
+
     // WinEvent 常量
     private const val EVENT_SYSTEM_FOREGROUND = 0x0003
     private const val WINEVENT_OUTOFCONTEXT = 0x0000
@@ -140,6 +143,10 @@ object WinEventDurationTracker {
     // Global MemorySession for allocations and stubs (kept alive while tracking)
     private val global: Arena = Arena.global()
 
+    private val appInfoCache = WeakHashMap<String, AppInfo>()
+
+    val appEventChannel = Channel<AppEvent>()
+
     // Create a downcall MethodHandle for a native symbol name and descriptor
     private fun downcall(lookUp: SymbolLookup, name: String, fd: FunctionDescriptor): MethodHandle {
         val sym = lookUp.find(name).orElseThrow { RuntimeException("Symbol not found: $name") }
@@ -181,19 +188,24 @@ object WinEventDurationTracker {
         println("Event $event")
         if (event != EVENT_SYSTEM_FOREGROUND) return
         try {
-            val info = getWindowInfo(hwnd)
-            val now = Instant.now()
+            val now = LocalDateTime.now()
+
             synchronized(this) {
-                val prev = currentKey
-                val prevStart = currentStart
-                if (prev != null && prevStart != null) {
-                    val elapsed = Duration.between(prevStart, now).toMillis()
-                    durations.merge(prev, elapsed) { a, b -> a + b }
-                }
-                currentKey = info.processName
-                currentStart = now
+                val info = getWindowInfo(hwnd)
+                appEventChannel.trySend(Foreground(info, now))
             }
-            println("Foreground -> $info at $now")
+
+//            synchronized(this) {
+//                val prev = currentKey
+//                val prevStart = currentStart
+//                if (prev != null && prevStart != null) {
+//                    val elapsed = Duration.between(prevStart, now).toMillis()
+//                    durations.merge(prev, elapsed) { a, b -> a + b }
+//                }
+//                currentKey = info.processName
+//                currentStart = now
+//            }
+//            println("Foreground -> $info at $now")
         } catch (t: Throwable) {
             System.err.println("winEventProc error: ${t.message}")
             t.printStackTrace()
@@ -203,14 +215,6 @@ object WinEventDurationTracker {
     private fun getWindowInfo(hwnd: MemorySegment): AppInfo {
         if (hwnd == MemorySegment.NULL) return AppInfo.NULL
         try {
-            // Get title length
-            val lenObj = getWindowTextLengthWHandle.invokeExact(hwnd) as Int
-            val bufChars = (lenObj + 1).coerceAtLeast(256)
-            val bufBytes = bufChars * 2 // WCHAR = 2 bytes
-            val mem = global.allocate(bufBytes.toLong())
-            // Call GetWindowTextW(hwnd, mem, bufChars)
-            getWindowTextWHandle.invokeExact(hwnd, mem, bufChars) as Int
-            val title = mem.getString(0, Charsets.UTF_16LE)
             // pid
             val pidBuf = global.allocate(JAVA_INT.byteSize())
             // Some GetWindowThreadProcessId declarations return thread id and set pidBuf
@@ -223,44 +227,50 @@ object WinEventDurationTracker {
                 pid
             ) as MemorySegment
 
-            val processPath = if ((0 == hProcess.address().toInt())) null
-            else {
-                try {
+            val processPath = try {
+                if ((0 == hProcess.address().toInt())) return AppInfo.NULL
+                else {
                     val buf: MemorySegment = global.allocate(1024 * 2)
                     val size: MemorySegment = global.allocate(JAVA_INT)
                     size.set(JAVA_INT, 0, 1024)
 
-                    val ok = queryFullProcessImageNameWHandle.invokeExact(
-                        hProcess,
-                        0,
-                        buf,
-                        size
-                    ) as Int
+                    if (queryFullProcessImageNameWHandle.invokeExact(
+                            hProcess,
+                            0,
+                            buf,
+                            size
+                        ) as Int == 0) return AppInfo.NULL
 
-                    if (ok == 0) null
-                    else Path.of(buf.getString(0, Charsets.UTF_16LE))
-                } finally {
-                    closeHandleHandle.invokeExact(hProcess) as Int
+                    buf.getString(0, Charsets.UTF_16LE)
                 }
+            } finally {
+                closeHandleHandle.invokeExact(hProcess) as Int
             }
 
+            if (processPath.isEmpty()) return AppInfo.NULL
+
+            val info = appInfoCache[processPath]
+            if (info != null) return info
+
+            val title = getTitle(hwnd)
+
+
+
             val name = if (processPath != null) {
-                getFileDescription(processPath.pathString) ?: "Unknown"
-            } else "Unknown"
+                getFileDescription(processPath) ?: "Unknown"
+            } else return AppInfo.NULL
 
-
-            val classNameBuf: MemorySegment = global.allocate(256 * 2)
-            getClassNameWHandle.invokeExact(hwnd, classNameBuf, 256) as Int
-            val className = classNameBuf.getString(0, Charsets.UTF_16LE)
-            return AppInfo(
+            val appInfo = AppInfo(
                 name = name,
                 title = title,
-                className = className,
                 processPath = processPath,
                 processId = pid
             )
+
+            appInfoCache[appInfo.processPath] = appInfo
+            return appInfo
         } catch (t: Throwable) {
-            System.err.println(t.message)
+            log.error(t.message, t)
 
             return AppInfo.NULL
         }
@@ -280,7 +290,7 @@ object WinEventDurationTracker {
             flags
         ) as MemorySegment
         hookHandle.set(res)
-        println("Hook set: $res")
+        log.info("Hook set: {}", res)
 
         // On JVM exit, ensure unhook and print stats
         Runtime.getRuntime().addShutdownHook(Thread {
@@ -295,10 +305,10 @@ object WinEventDurationTracker {
             if (h != null && h != MemorySegment.NULL) {
                 unhookWinEventHandle.invokeExact(h) as Int
                 hookHandle.set(null)
-                println("Hook removed")
+                log.info("Hook removed")
             }
         } catch (t: Throwable) {
-            System.err.println("Error unhooking: ${t.message}")
+            log.error("Error unhooking: {}", t.message)
         }
 
         // finalize current window
@@ -310,10 +320,20 @@ object WinEventDurationTracker {
             durations.merge(prev, elapsed) { a, b -> a + b }
         }
 
-        println("=== Accumulated durations (ms) ===")
+        log.info("=== Accumulated durations (ms) ===")
         durations.entries.sortedByDescending { it.value }.forEach { (k, v) ->
-            println("$k -> $v ms")
+            log.info("{} -> {} ms", k, v)
         }
+    }
+
+    fun getTitle(hwnd: MemorySegment): String {
+        val lenObj = getWindowTextLengthWHandle.invokeExact(hwnd) as Int
+        val bufChars = (lenObj + 1).coerceAtLeast(256)
+        val bufBytes = bufChars * 2 // WCHAR = 2 bytes
+        val mem = global.allocate(bufBytes.toLong())
+        // Call GetWindowTextW(hwnd, mem, bufChars)
+        getWindowTextWHandle.invokeExact(hwnd, mem, bufChars) as Int
+        return mem.getString(0, Charsets.UTF_16LE)
     }
 
     @Throws(Throwable::class)
@@ -366,45 +386,26 @@ object WinEventDurationTracker {
             ) as Int == 0
         ) return null
 
-        val value = valuePtr.get(ADDRESS, 0).reinterpret(valueLen.get(JAVA_INT, 0).toLong())
-        return value.getString(0, Charsets.UTF_16LE)
+        return readLPWSTR(valuePtr, valueLen)
     }
 
-    private data class AppInfo(
-        val name: String,
-        val title: String,
-        val className: String,
-        val processPath: Path?,
-        val processId: Int,
-    ) {
-        val processName = processPath?.fileName.toString()
+    private fun readLPWSTR(valuePtr: MemorySegment, valueLen: MemorySegment): String {
+        return valuePtr.get(ADDRESS, 0)
+            .reinterpret(valueLen.get(JAVA_INT, 0) * 2L)
+            .getString(0, Charsets.UTF_16LE)
 
-        companion object {
-            val NULL = AppInfo("Unknown", "<unknown>", "unknown", null, 0)
-        }
     }
 
-    @JvmStatic
-    fun main(args: Array<String>) {
-        println("Starting WinEventDurationTracker (JDK 25) - Press Ctrl+C to stop")
-        try {
-            startTracking()
-        } catch (t: Throwable) {
-            System.err.println("Failed to start hook: ${t.message}")
-            t.printStackTrace()
-            exitProcess(1)
-        }
-
+    fun lunch() {
+        startTracking()
         // Keep JVM alive. SetWinEventHook with OUTOFCONTEXT will deliver callbacks without requiring message loop,
         // but we keep the process alive and responsive to Ctrl+C.
         try {
             val msg: MemorySegment = global.allocate(48)
 
             while ((getMessageWHandle.invokeExact(msg, MemorySegment.NULL, 0, 0) as Int) != 0) {
-                println("MSG: ${msg.asByteBuffer().getInt()}")
+                log.debug("MSG: {}", msg.asByteBuffer().getInt())
             }
-        } catch (ie: InterruptedException) {
-            // exit loop
         } finally {
             stopTracking()
         }
