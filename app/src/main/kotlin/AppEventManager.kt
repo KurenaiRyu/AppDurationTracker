@@ -1,6 +1,8 @@
 package moe.kurenai.app
 
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -10,10 +12,14 @@ object AppEventManager {
     private var currentApp: AppInfo? = null
     private var currentDateTime: LocalDateTime? = null
 
-    val hourEventChannel = Channel<HourStatEvent>()
-    val dayEventChannel = Channel<DayStatEvent>()
-    val totalEventChannel = Channel<TotalStatEvent>()
-    val sessionEventChannel = Channel<SessionStatEvent>()
+    val hourEventFlow: SharedFlow<HourStatEvent>
+        field = MutableSharedFlow<HourStatEvent>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val dayEventFlow: SharedFlow<DayStatEvent>
+        field = MutableSharedFlow<DayStatEvent>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val totalEventFlow: SharedFlow<TotalStatEvent>
+        field = MutableSharedFlow<TotalStatEvent>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val sessionEventFlow: SharedFlow<SessionStatEvent>
+        field = MutableSharedFlow<SessionStatEvent>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     
     fun handleEvent(event: AppEvent) {
         when (event) {
@@ -31,23 +37,22 @@ object AppEventManager {
 
     private fun dispatchEvent(app: AppInfo, dateTime: LocalDateTime, nextDateTime: LocalDateTime) {
         val duration = Duration.between(dateTime, nextDateTime).toMinutes()
-        sessionEventChannel.trySend(SessionStatEvent(app, duration, dateTime, nextDateTime))
+        sessionEventFlow.tryEmit(SessionStatEvent(app, duration, dateTime, nextDateTime))
 //        handleHour(app, dateTime, nextDateTime, duration)
-        handleDay(app, dateTime, nextDateTime, duration)
+        handleDay(app, dateTime, duration)
         handleTotal(app, duration)
     }
 
     private fun handleDay(
         app: AppInfo,
         dateTime: LocalDateTime,
-        nextDateTime: LocalDateTime,
         duration: Long
     ) {
         var nextDuration = duration
         var count = 0
         while (nextDuration >= 0) {
             val min = nextDuration % (60 * 24)
-            dayEventChannel.trySend(DayStatEvent (app, min, dateTime.toLocalDate()))
+            dayEventFlow.tryEmit(DayStatEvent (app, min, dateTime.toLocalDate()))
             nextDuration -= 60 * 24
             count++
         }
@@ -57,7 +62,7 @@ object AppEventManager {
         app: AppInfo,
         duration: Long
     ) {
-        totalEventChannel.trySend(TotalStatEvent (app, duration))
+        totalEventFlow.tryEmit(TotalStatEvent (app, duration))
     }
 
     private fun handleHour(
@@ -70,7 +75,7 @@ object AppEventManager {
         var time = dateTime
         while (nextDuration >= 0) {
             val min = nextDuration % 60
-            hourEventChannel.trySend(HourStatEvent(app, min, time.toLocalDate(), time.hour))
+            hourEventFlow.tryEmit(HourStatEvent(app, min, time.toLocalDate(), time.hour))
             nextDuration -= 60
             count++
             time = time.plusHours(1)

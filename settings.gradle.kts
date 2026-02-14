@@ -31,5 +31,6 @@ plugins {
 // Learn more about structuring projects with Gradle - https://docs.gradle.org/8.7/userguide/multi_project_builds.html
 include(":app")
 include(":utils")
+includeBuild("build-logic")
 
 rootProject.name = "AppDurationTracker"
